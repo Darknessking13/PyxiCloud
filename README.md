@@ -1,0 +1,1 @@
+PyxisCloud: A lightweight, real-time database server built for Node.js. Offers fast, scalable data storage and retrieval via WebSocket connections. Perfect for applications requiring real-time data synchronization.
