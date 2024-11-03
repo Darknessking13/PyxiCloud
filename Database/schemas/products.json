@@ -1,0 +1,15 @@
+{
+  "name": {
+    "type": "string",
+    "required": true,
+    "unique": true
+  },
+  "price": {
+    "type": "number",
+    "required": true
+  },
+  "quantity": {
+    "type": "number",
+    "required": true
+  }
+}

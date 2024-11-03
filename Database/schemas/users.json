@@ -1,0 +1,15 @@
+{
+  "name": {
+    "type": "string",
+    "required": true
+  },
+  "email": {
+    "type": "string",
+    "required": true,
+    "unique": true
+  },
+  "age": {
+    "type": "number",
+    "required": true
+  }
+}
