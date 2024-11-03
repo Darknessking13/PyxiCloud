@@ -92,7 +92,7 @@ Common issues and their solutions:
 
 ## Support and Community
 
-For support, bug reports, or feature requests, please open an issue on the [PyxisCloud GitHub repository](https://github.com/yourusername/pyxiscloud/issues).
+For support, bug reports, or feature requests, please open an issue on the [PyxisCloud GitHub repository](https://github.com/Darknessking13/PyxiCloud.git/issues).
 
 ## License
 
