@@ -63,10 +63,6 @@ PyxisCloud provides basic security features through IP whitelisting and blacklis
 3. Use firewalls to restrict access to the PyxisCloud server.
 4. Enable IP whitelisting or blacklisting as needed in the `config.js` file.
 
-## Data Persistence
-
-PyxisCloud uses in-memory storage by default. For data persistence, you may need to implement a custom storage solution or integrate with a database like MongoDB. Consult the PyxisCloud documentation or repository for information on extending the storage capabilities.
-
 ## Troubleshooting
 
 Common issues and their solutions:
