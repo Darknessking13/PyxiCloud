@@ -1,15 +1,13 @@
 [
   {
-    "name": "John Doe",
+    "username": "john_doe",
     "email": "john@example.com",
-    "age": 25,
     "tags": [
-      "admin",
-      "user"
+      "admin"
     ],
-    "isActive": true,
-    "createdAt": "2024-11-02T11:00:41.080Z",
-    "metadata": {},
-    "_id": "zbjhzg4x5"
+    "age": 18,
+    "$set": {
+      "settings.theme": "dark"
+    }
   }
 ]

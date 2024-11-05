@@ -1,14 +1,11 @@
 const WebSocket = require('ws');
-const pyx = require('./Database/index');
 const fs = require('fs');
 const path = require('path');
 const config = require('./config');
-const crypto = require('crypto');
 
 const schemaDirectory = path.join(__dirname, 'Database', 'schemas');
 const collectionsDirectory = path.join(__dirname, 'Database', 'collections');
 
-// Create directories if they don't exist
 if (!fs.existsSync(schemaDirectory)) {
     fs.mkdirSync(schemaDirectory, { recursive: true });
 }
@@ -20,9 +17,10 @@ class PyxiCloudServer {
     constructor() {
         this.wss = null;
         this.clients = new Set();
-        this.heartbeatInterval = 30000; // 30 seconds
-        this.maxPayloadSize = 1024 * 1024; // 1MB
+        this.heartbeatInterval = 30000;
+        this.maxPayloadSize = 1024 * 1024;
         this.rateLimiter = new Map();
+        this.schemas = new Map();
     }
 
     start() {
@@ -58,7 +56,7 @@ class PyxiCloudServer {
 
         ws.on('message', async (message) => {
             if (!this.checkRateLimit(clientIP)) {
-                sendError(ws, 'Rate limit exceeded. Please try again later.');
+                this.sendError(ws, 'Rate limit exceeded. Please try again later.');
                 return;
             }
 
@@ -66,14 +64,14 @@ class PyxiCloudServer {
             try {
                 const event = JSON.parse(message.toString());
                 if (!this.validateEvent(event)) {
-                    sendError(ws, 'Invalid event format');
+                    this.sendError(ws, 'Invalid event format');
                     return;
                 }
                 console.log('Parsed event:', event);
                 await this.handleRequest(event, ws);
             } catch (error) {
                 console.error('Error processing message:', error);
-                sendError(ws, 'Invalid message format');
+                this.sendError(ws, 'Invalid message format');
             }
         });
 
@@ -90,12 +88,12 @@ class PyxiCloudServer {
 
     checkAccessDenied(clientIP, ws) {
         if (config.ipWhitelist && !config.whitelistedIps.includes(clientIP)) {
-            sendError(ws, 'Access denied. IP not in whitelist.');
+            this.sendError(ws, 'Access denied. IP not in whitelist.');
             ws.close();
             return true;
         }
         if (config.ipBlacklist && config.blacklistedIps.includes(clientIP)) {
-            sendError(ws, 'Access denied. IP in blacklist.');
+            this.sendError(ws, 'Access denied. IP in blacklist.');
             ws.close();
             return true;
         }
@@ -104,8 +102,8 @@ class PyxiCloudServer {
 
     checkRateLimit(clientIP) {
         const now = Date.now();
-        const limit = 100; // 100 requests
-        const interval = 60000; // per minute
+        const limit = 100;
+        const interval = 60000;
 
         if (!this.rateLimiter.has(clientIP)) {
             this.rateLimiter.set(clientIP, []);
@@ -168,111 +166,107 @@ class PyxiCloudServer {
                     break;
                 default:
                     console.log('Unknown event type:', event.type);
-                    sendError(ws, 'Unknown event type', requestId);
+                    this.sendError(ws, 'Unknown event type', requestId);
             }
         } catch (error) {
             console.error('Error handling event:', error);
-            sendError(ws, error.message, event.requestId);
+            this.sendError(ws, error.message, event.requestId);
         }
     }
 
     async createSchema(data, ws, requestId) {
         const { collectionName, schemaDefinition } = data;
         if (!this.validateSchemaData(collectionName, schemaDefinition)) {
-            sendError(ws, 'Invalid schema data', requestId);
+            this.sendError(ws, 'Invalid schema data', requestId);
             return;
         }
 
-        const schemaPath = path.join(schemaDirectory, `${this.sanitizeFileName(collectionName)}.json`);
-
         try {
-            if (fs.existsSync(schemaPath)) {
-                sendError(ws, 'Schema already exists', requestId);
-            } else {
-                await fs.promises.writeFile(schemaPath, JSON.stringify(schemaDefinition, null, 2));
-                sendSuccess(ws, 'Schema created successfully', requestId);
-            }
+            this.schemas.set(collectionName, schemaDefinition);
+            const schemaPath = path.join(schemaDirectory, `${collectionName}.json`);
+            fs.writeFileSync(schemaPath, JSON.stringify(schemaDefinition, null, 2));
+            this.sendSuccess(ws, 'Schema created successfully', requestId);
         } catch (error) {
-            sendError(ws, `Failed to create schema: ${error.message}`, requestId);
+            this.sendError(ws, `Failed to create schema: ${error.message}`, requestId);
         }
     }
 
     async updateSchema(data, ws, requestId) {
         const { collectionName, schemaDefinition } = data;
         if (!this.validateSchemaData(collectionName, schemaDefinition)) {
-            sendError(ws, 'Invalid schema data', requestId);
+            this.sendError(ws, 'Invalid schema data', requestId);
             return;
         }
 
-        const schemaPath = path.join(schemaDirectory, `${this.sanitizeFileName(collectionName)}.json`);
-
         try {
-            if (!fs.existsSync(schemaPath)) {
-                sendError(ws, 'Schema does not exist', requestId);
-                return;
-            }
-
-            await fs.promises.writeFile(schemaPath, JSON.stringify(schemaDefinition, null, 2));
-            sendSuccess(ws, 'Schema updated successfully', requestId);
+            this.schemas.set(collectionName, schemaDefinition);
+            const schemaPath = path.join(schemaDirectory, `${collectionName}.json`);
+            fs.writeFileSync(schemaPath, JSON.stringify(schemaDefinition, null, 2));
+            this.sendSuccess(ws, 'Schema updated successfully', requestId);
         } catch (error) {
-            sendError(ws, `Failed to update schema: ${error.message}`, requestId);
+            this.sendError(ws, `Failed to update schema: ${error.message}`, requestId);
         }
     }
 
     validateSchemaData(collectionName, schemaDefinition) {
         return (
             typeof collectionName === 'string' &&
-            collectionName.length > 0 &&
+            collectionName.length > 0  &&
             typeof schemaDefinition === 'object' &&
             Object.keys(schemaDefinition).length > 0
         );
     }
 
-    sanitizeFileName(fileName) {
-        return fileName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-    }
-
     async handleQuery(data, ws, requestId) {
         const { collectionName, operation, ...params } = data;
         if (!this.validateQueryData(collectionName, operation, params)) {
-            sendError(ws, 'Invalid query data', requestId);
+            this.sendError(ws, 'Invalid query data', requestId);
             return;
         }
 
-        const schemaPath = path.join(schemaDirectory, `${this.sanitizeFileName(collectionName)}.json`);
-        const collectionPath = path.join(collectionsDirectory, `${this.sanitizeFileName(collectionName)}.json`);
-
         try {
-            await this.ensureCollectionExists(collectionPath);
-            let result;
+            const schema = this.schemas.get(collectionName);
+            if (!schema) {
+                throw new Error(`Schema for collection "${collectionName}" not found`);
+            }
 
+            let result;
             switch (operation) {
-                case 'insert':
-                    result = await this.insertDocument(collectionPath, params.document);
+                case 'insertOne':
+                    result = await this.insertOne(collectionName, params.document, schema);
+                    break;
+                case 'insertMany':
+                    result = await this.insertMany(collectionName, params.documents, schema);
                     break;
                 case 'find':
-                    result = await this.findDocuments(collectionPath, params.query || {});
+                    result = await this.find(collectionName, params.query || {});
                     break;
-                case 'update':
-                    result = await this.updateDocuments(collectionPath, params.query, params.updateFields);
+                case 'findOne':
+                    result = await this.findOne(collectionName, params.query || {});
                     break;
-                case 'delete':
-                    result = await this.deleteDocuments(collectionPath, params.query);
+                case 'updateOne':
+                    result = await this.updateOne(collectionName, params.query, params.updateFields);
                     break;
-                case 'count':
-                    result = await this.countDocuments(collectionPath, params.query || {});
+                case 'updateMany':
+                    result = await this.updateMany(collectionName, params.query, params.updateFields);
+                    break;
+                case 'deleteOne':
+                    result = await this.deleteOne(collectionName, params.query);
+                    break;
+                case 'deleteMany':
+                    result = await this.deleteMany(collectionName, params.query);
                     break;
                 default:
                     throw new Error('Invalid operation');
             }
-            sendSuccess(ws, result, requestId);
+            this.sendSuccess(ws, result, requestId);
         } catch (error) {
-            sendError(ws, error.message, requestId);
+            this.sendError(ws, error.message, requestId);
         }
     }
 
     validateQueryData(collectionName, operation, params) {
-        const validOperations = ['insert', 'find', 'update', 'delete', 'count'];
+        const validOperations = ['insertOne', 'insertMany', 'find', 'findOne', 'updateOne', 'updateMany', 'deleteOne', 'deleteMany'];
         return (
             typeof collectionName === 'string' &&
             collectionName.length > 0 &&
@@ -281,127 +275,187 @@ class PyxiCloudServer {
         );
     }
 
-    async ensureCollectionExists(collectionPath) {
-        try {
-            await fs.promises.access(collectionPath);
-        } catch (error) {
-            if (error.code === 'ENOENT') {
-                await fs.promises.writeFile(collectionPath, JSON.stringify([], null, 2));
-            } else {
-                throw error;
+    async insertOne(collectionName, document, schema) {
+        const validatedDocument = this.validateAndApplyDefaults(document, schema);
+        const collectionPath = path.join(collectionsDirectory, `${collectionName}.json`);
+        let collection = [];
+        if (fs.existsSync(collectionPath)) {
+            collection = JSON.parse(fs.readFileSync(collectionPath, 'utf-8'));
+        }
+        collection.push(validatedDocument);
+        fs.writeFileSync(collectionPath, JSON.stringify(collection, null, 2));
+        return validatedDocument;
+    }
+
+    async insertMany(collectionName, documents, schema) {
+        const validatedDocuments = documents.map(doc => this.validateAndApplyDefaults(doc, schema));
+        const collectionPath = path.join(collectionsDirectory, `${collectionName}.json`);
+        let collection = [];
+        if (fs.existsSync(collectionPath)) {
+            collection = JSON.parse(fs.readFileSync(collectionPath, 'utf-8'));
+        }
+        collection.push(...validatedDocuments);
+        fs.writeFileSync(collectionPath, JSON.stringify(collection, null, 2));
+        return validatedDocuments;
+    }
+
+    validateAndApplyDefaults(document, schema) {
+        const validatedDocument = { ...document };
+        for (const [field, fieldSchema] of Object.entries(schema)) {
+            if (!(field in validatedDocument)) {
+                if ('default' in fieldSchema) {
+                    validatedDocument[field] = typeof fieldSchema.default === 'function' 
+                        ? fieldSchema.default() 
+                        : fieldSchema.default;
+                } else if (fieldSchema.required) {
+                    throw new Error(`Required field "${field}" is missing`);
+                }
             }
         }
+        return validatedDocument;
     }
 
-    async insertDocument(collectionPath, document) {
-        await this.ensureCollectionExists(collectionPath);
-        const data = await fs.promises.readFile(collectionPath, 'utf-8');
-        let documents = JSON.parse(data);
-        
-        // Remove _id and createdAt if they exist
-        delete document._id;
-        delete document.createdAt;
-        
-        // Check for duplicates
-        const isDuplicate = documents.some(doc => this.isEqual(doc, document));
-        if (isDuplicate) {
-            throw new Error('Duplicate document');
+    async find(collectionName, query) {
+        const collectionPath = path.join(collectionsDirectory, `${collectionName}.json`);
+        if (!fs.existsSync(collectionPath)) {
+            return [];
         }
-        
-        documents.push(document);
-        await fs.promises.writeFile(collectionPath, JSON.stringify(documents, null, 2));
-        return document;
+        const collection = JSON.parse(fs.readFileSync(collectionPath, 'utf-8'));
+        return collection.filter(doc => this.matchQuery(doc, query));
     }
 
-    isEqual(obj1, obj2) {
-        return JSON.stringify(obj1) === JSON.stringify(obj2);
+    async findOne(collectionName, query) {
+        const collectionPath = path.join(collectionsDirectory, `${collectionName}.json`);
+        if (!fs.existsSync(collectionPath)) {
+            return null;
+        }
+        const collection = JSON.parse(fs.readFileSync(collectionPath, 'utf-8'));
+        return collection.find(doc => this.matchQuery(doc, query)) || null;
     }
 
-    async findDocuments(collectionPath, query) {
-        await this.ensureCollectionExists(collectionPath);
-        const data = await fs.promises.readFile(collectionPath, 'utf-8');
-        const documents = JSON.parse(data);
-        return documents.filter(doc => this.matchQuery(doc, query));
+    async updateOne(collectionName, query, updateFields) {
+        const collectionPath = path.join(collectionsDirectory, `${collectionName}.json`);
+        if (!fs.existsSync(collectionPath)) {
+            return { matchedCount: 0, modifiedCount: 0 };
+        }
+        let collection = JSON.parse(fs.readFileSync(collectionPath, 'utf-8'));
+        const index = collection.findIndex(doc => this.matchQuery(doc, query));
+        if (index !== -1) {
+            collection[index] = { ...collection[index], ...updateFields };
+            fs.writeFileSync(collectionPath, JSON.stringify(collection, null, 2));
+            return { matchedCount: 1, modifiedCount: 1 };
+        }
+        return { matchedCount: 0, modifiedCount: 0 };
     }
 
-    async updateDocuments(collectionPath, query, updateFields) {
-        await this.ensureCollectionExists(collectionPath);
-        const data = await fs.promises.readFile(collectionPath, 'utf-8');
-        let documents = JSON.parse(data);
-        let updatedCount = 0;
-        documents = documents.map(doc => {
+    async updateMany(collectionName, query, updateFields) {
+        const collectionPath = path.join(collectionsDirectory, `${collectionName}.json`);
+        if (!fs.existsSync(collectionPath)) {
+            return { matchedCount: 0, modifiedCount: 0 };
+        }
+        let collection = JSON.parse(fs.readFileSync(collectionPath, 'utf-8'));
+        let modifiedCount = 0;
+        collection = collection.map(doc => {
             if (this.matchQuery(doc, query)) {
-                updatedCount++;
+                modifiedCount++;
                 return { ...doc, ...updateFields };
             }
             return doc;
         });
-        await fs.promises.writeFile(collectionPath, JSON.stringify(documents, null, 2));
-        return updatedCount;
+        fs.writeFileSync(collectionPath, JSON.stringify(collection, null, 2));
+        return { matchedCount: modifiedCount, modifiedCount };
     }
 
-    async deleteDocuments(collectionPath, query) {
-        await this.ensureCollectionExists(collectionPath);
-        const data = await fs.promises.readFile(collectionPath, 'utf-8');
-        let documents = JSON.parse(data);
-        const initialCount = documents.length;
-        documents = documents.filter(doc => !this.matchQuery(doc, query));
-        await fs.promises.writeFile(collectionPath, JSON.stringify(documents, null, 2));
-        return initialCount - documents.length;
-    }
-
-    async countDocuments(collectionPath, query) {
-        try {
-            const data = await fs.promises.readFile(collectionPath, 'utf-8');
-            const documents = JSON.parse(data);
-            if (Object.keys(query).length === 0) {
-                return documents.length;
-            }
-            return documents.filter(doc => this.matchQuery(doc, query)).length;
-        } catch (error) {
-            if (error.code === 'ENOENT') {
-                await fs.promises.writeFile(collectionPath, JSON.stringify([], null, 2));
-                return 0;
-            }
-            throw error;
+    async deleteOne(collectionName, query) {
+        const collectionPath = path.join(collectionsDirectory, `${collectionName}.json`);
+        if (!fs.existsSync(collectionPath)) {
+            return { deletedCount: 0 };
         }
+        let collection = JSON.parse(fs.readFileSync(collectionPath, 'utf-8'));
+        const initialLength = collection.length;
+        collection = collection.filter(doc => !this.matchQuery(doc, query));
+        fs.writeFileSync(collectionPath, JSON.stringify(collection, null, 2));
+        return { deletedCount: initialLength - collection.length };
+    }
+
+    async deleteMany(collectionName, query) {
+        const collectionPath = path.join(collectionsDirectory, `${collectionName}.json`);
+        if (!fs.existsSync(collectionPath)) {
+            return { deletedCount: 0 };
+        }
+        let collection = JSON.parse(fs.readFileSync(collectionPath, 'utf-8'));
+        const initialLength = collection.length;
+        collection = collection.filter(doc => !this.matchQuery(doc, query));
+        fs.writeFileSync(collectionPath, JSON.stringify(collection, null, 2));
+        return { deletedCount: initialLength - collection.length };
     }
 
     matchQuery(doc, query) {
         for (const [key, value] of Object.entries(query)) {
-            if (doc[key] !== value) {
+            if (typeof value === 'object' && value !== null) {
+                if (!this.matchOperators(doc[key], value)) {
+                    return false;
+                }
+            } else if (doc[key] !== value) {
                 return false;
             }
         }
         return true;
     }
+
+    matchOperators(fieldValue, operators) {
+        for (const [operator, operand] of Object.entries(operators)) {
+            switch (operator) {
+                case '$eq':
+                    if (fieldValue !== operand) return false;
+                    break;
+                case '$ne':
+                    if (fieldValue === operand) return false;
+                    break;
+                case '$gt':
+                    if (!(fieldValue > operand)) return false;
+                    break;
+                case '$gte':
+                    if (!(fieldValue >= operand)) return false;
+                    break;
+                case '$lt':
+                    if (!(fieldValue < operand)) return false;
+                    break;
+                case '$lte':
+                    if (!(fieldValue <= operand)) return false;
+                    break;
+                case '$in':
+                    if (!Array.isArray(operand) || !operand.includes(fieldValue)) return false;
+                    break;
+                case '$nin':
+                    if (!Array.isArray(operand) || operand.includes(fieldValue)) return false;
+                    break;
+                default:
+                    throw new Error(`Unsupported operator: ${operator}`);
+            }
+        }
+        return true;
+    }
+
+    sendSuccess(ws, data, requestId) {
+        const response = JSON.stringify({ 
+            status: 'success', 
+            data,
+            requestId 
+        });
+        ws.send(response);
+    }
+
+    sendError(ws, message, requestId) {
+        const response = JSON.stringify({ 
+            status: 'error', 
+            message,
+            requestId 
+        });
+        ws.send(response);
+    }
 }
 
-function sendSuccess(ws, data, requestId) {
-    console.log('Sending success response:', { data, requestId });
-    const response = JSON.stringify({ 
-        status: 'success', 
-        data,
-        requestId 
-    });
-    ws.send(response, { binary: false }, (error) => {
-        if (error) console.error('Send error:', error);
-    });
-}
-
-function sendError(ws, message, requestId) {
-    console.log('Sending error response:', { message, requestId });
-    const response = JSON.stringify({ 
-        status: 'error', 
-        message,
-        requestId 
-    });
-    ws.send(response, { binary: false }, (error) => {
-        if (error) console.error('Send error:', error);
-    });
-}
-
-// Initialize and start the server
 const server = new PyxiCloudServer();
 server.start();
 server.startHeartbeat();
