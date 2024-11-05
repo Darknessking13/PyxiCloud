@@ -282,6 +282,17 @@ class PyxiCloudServer {
         if (fs.existsSync(collectionPath)) {
             collection = JSON.parse(fs.readFileSync(collectionPath, 'utf-8'));
         }
+
+        // Check for unique constraints
+        for (const [field, fieldSchema] of Object.entries(schema)) {
+            if (fieldSchema.unique && validatedDocument[field] !== undefined) {
+                const isDuplicate = collection.some(doc => doc[field] === validatedDocument[field]);
+                if (isDuplicate) {
+                    throw new Error(`Duplicate value for unique field "${field}"`);
+                }
+            }
+        }
+
         collection.push(validatedDocument);
         fs.writeFileSync(collectionPath, JSON.stringify(collection, null, 2));
         return validatedDocument;
@@ -294,6 +305,19 @@ class PyxiCloudServer {
         if (fs.existsSync(collectionPath)) {
             collection = JSON.parse(fs.readFileSync(collectionPath, 'utf-8'));
         }
+
+        // Check for unique constraints
+        for (const document of validatedDocuments) {
+            for (const [field, fieldSchema] of Object.entries(schema)) {
+                if (fieldSchema.unique && document[field] !== undefined) {
+                    const isDuplicate = collection.some(doc => doc[field] === document[field]);
+                    if (isDuplicate) {
+                        throw new Error(`Duplicate value for unique field "${field}"`);
+                    }
+                }
+            }
+        }
+
         collection.push(...validatedDocuments);
         fs.writeFileSync(collectionPath, JSON.stringify(collection, null, 2));
         return validatedDocuments;
@@ -339,9 +363,25 @@ class PyxiCloudServer {
             return { matchedCount: 0, modifiedCount: 0 };
         }
         let collection = JSON.parse(fs.readFileSync(collectionPath, 'utf-8'));
+        const schema = this.schemas.get(collectionName);
+
         const index = collection.findIndex(doc => this.matchQuery(doc, query));
         if (index !== -1) {
-            collection[index] = { ...collection[index], ...updateFields };
+            const updatedDocument = { ...collection[index], ...updateFields };
+
+            // Check for unique constraints
+            for (const [field, fieldSchema] of Object.entries(schema)) {
+                if (fieldSchema.unique && updateFields[field] !== undefined) {
+                    const isDuplicate = collection.some((doc, i) => 
+                        i !== index && doc[field] === updateFields[field]
+                    );
+                    if (isDuplicate) {
+                        throw new Error(`Duplicate value for unique field "${field}"`);
+                    }
+                }
+            }
+
+            collection[index] = updatedDocument;
             fs.writeFileSync(collectionPath, JSON.stringify(collection, null, 2));
             return { matchedCount: 1, modifiedCount: 1 };
         }
@@ -354,15 +394,32 @@ class PyxiCloudServer {
             return { matchedCount: 0, modifiedCount: 0 };
         }
         let collection = JSON.parse(fs.readFileSync(collectionPath, 'utf-8'));
+        const schema = this.schemas.get(collectionName);
+
         let modifiedCount = 0;
-        collection = collection.map(doc => {
+        const updatedCollection = collection.map((doc, index) => {
             if (this.matchQuery(doc, query)) {
+                const updatedDocument = { ...doc, ...updateFields };
+
+                // Check for unique constraints
+                for (const [field, fieldSchema] of Object.entries(schema)) {
+                    if (fieldSchema.unique && updateFields[field] !== undefined) {
+                        const isDuplicate = collection.some((otherDoc, i) => 
+                            i !== index && otherDoc[field] === updateFields[field]
+                        );
+                        if (isDuplicate) {
+                            throw new Error(`Duplicate value for unique field "${field}"`);
+                        }
+                    }
+                }
+
                 modifiedCount++;
-                return { ...doc, ...updateFields };
+                return updatedDocument;
             }
             return doc;
         });
-        fs.writeFileSync(collectionPath, JSON.stringify(collection, null, 2));
+
+        fs.writeFileSync(collectionPath, JSON.stringify(updatedCollection, null, 2));
         return { matchedCount: modifiedCount, modifiedCount };
     }
 
