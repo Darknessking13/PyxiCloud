@@ -1,7 +1,5 @@
 # PyxisCloud Documentation
 
-## Note: Im currently updating both PyxisDB and PyxiCloud, bc both have some issue, in few hours we gonna Release the New version 
-
 PyxisCloud is a lightweight, real-time database server built for Node.js applications. It offers fast, scalable data storage and retrieval via WebSocket connections, making it perfect for applications requiring real-time data synchronization.
 
 ## Important Note
