@@ -1,13 +1,7 @@
 [
   {
-    "username": "john_doe",
-    "email": "john@example.com",
-    "tags": [
-      "admin"
-    ],
-    "age": 18,
-    "$set": {
-      "settings.theme": "dark"
-    }
+    "name": "John Doe",
+    "email": "admin@example.com",
+    "age": 30
   }
 ]

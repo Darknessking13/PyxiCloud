@@ -1,37 +1,9 @@
 {
-  "username": {
-    "type": "string",
-    "required": true,
+  "name": {},
+  "email": {
     "unique": true
   },
-  "email": {
-    "type": "string",
-    "required": true
-  },
   "age": {
-    "type": "number",
     "default": 18
-  },
-  "createdAt": {
-    "type": "date"
-  },
-  "settings": {
-    "type": "object",
-    "properties": {
-      "theme": {
-        "type": "string",
-        "default": "light"
-      },
-      "notifications": {
-        "type": "boolean",
-        "default": true
-      }
-    }
-  },
-  "tags": {
-    "type": "array",
-    "items": {
-      "type": "string"
-    }
   }
 }

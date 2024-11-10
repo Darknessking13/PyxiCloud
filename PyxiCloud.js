@@ -1,74 +1,157 @@
 const WebSocket = require('ws');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const config = require('./config');
+const { generateKeyPair, computeSharedSecret, encrypt, decrypt } = require('./Database/encryption');
+const { handleAuthentication } = require('./Database/authentication');
 
 const schemaDirectory = path.join(__dirname, 'Database', 'schemas');
 const collectionsDirectory = path.join(__dirname, 'Database', 'collections');
-
-if (!fs.existsSync(schemaDirectory)) {
-    fs.mkdirSync(schemaDirectory, { recursive: true });
-}
-if (!fs.existsSync(collectionsDirectory)) {
-    fs.mkdirSync(collectionsDirectory, { recursive: true });
-}
+const backupDirectory = path.join(__dirname,  'Database', 'Backups');
 
 class PyxiCloudServer {
     constructor() {
         this.wss = null;
         this.clients = new Set();
-        this.heartbeatInterval = 30000;
-        this.maxPayloadSize = 1024 * 1024;
-        this.rateLimiter = new Map();
+        this.sessions = new Map();
+        this.keyPair = generateKeyPair();
         this.schemas = new Map();
+        this.backupInterval = null;
     }
 
     start() {
+        console.log(`PyxiCloud Server is Starting on pyx://${config.serverIP}:${config.port}`);
         this.wss = new WebSocket.Server({ 
             port: config.port,
             clientTracking: true,
             handleProtocols: () => 'pyxisdb-protocol',
-            maxPayload: this.maxPayloadSize
+            maxPayload: config.maxPayloadSize,
+            verifyClient: this.verifyClient.bind(this)
         });
 
         this.wss.on('connection', this.handleConnection.bind(this));
+        this.initializeDatabase();
+        this.startBackupSystem();
+        console.log(`WebSocket server is running on pyx://${config.serverIP}:${config.port}`);
+    }
 
-        console.log(`WebSocket server is running on ws://${config.serverIP}:${config.port}`);
+    verifyClient(info, callback) {
+        const clientIp = info.req.socket.remoteAddress;
+
+        if (config.ipWhitelist && !config.whitelistedIps.includes(clientIp)) {
+            callback(false, 403, 'IP not whitelisted');
+            return;
+        }
+
+        if (config.ipBlacklist && config.blacklistedIps.includes(clientIp)) {
+            callback(false, 403, 'IP blacklisted');
+            return;
+        }
+
+        if (this.clients.size >= config.maxConnections) {
+            callback(false, 503, 'Server at maximum capacity');
+            return;
+        }
+
+        callback(true);
+    }
+
+    initializeDatabase() {
+        if (!fs.existsSync(schemaDirectory)) {
+            fs.mkdirSync(schemaDirectory, { recursive: true });
+        }
+        if (!fs.existsSync(collectionsDirectory)) {
+            fs.mkdirSync(collectionsDirectory, { recursive: true });
+        }
+        if (!fs.existsSync(backupDirectory)) {
+            fs.mkdirSync(backupDirectory, { recursive: true });
+        }
+    }
+
+    startBackupSystem() {
+        this.backupInterval = setInterval(() => {
+            this.createBackup();
+            this.deleteOldBackups();
+        }, config.backupInterval);
+    }
+
+    createBackup() {
+        const timestamp = new Date().toISOString().replace(/:/g, '-');
+        const backupPath = path.join(backupDirectory, `backup_${timestamp}`);
+        fs.mkdirSync(backupPath);
+
+        // Backup schemas
+        fs.copyFileSync(schemaDirectory, path.join(backupPath, 'schemas'));
+
+        // Backup collections
+        fs.copyFileSync(collectionsDirectory, path.join(backupPath, 'collections'));
+
+        console.log(`Backup created: ${backupPath}`);
+    }
+
+    deleteOldBackups() {
+        const currentDate = new Date();
+        fs.readdirSync(backupDirectory).forEach(backupFolder => {
+            const backupPath = path.join(backupDirectory, backupFolder);
+            const backupDate = new Date(backupFolder.split('_')[1]);
+            const daysSinceBackup = (currentDate - backupDate) / (1000 * 60 * 60 * 24);
+
+            if (daysSinceBackup > config.backupRetentionDays) {
+                fs.rmdirSync(backupPath, { recursive: true });
+                console.log(`Deleted old backup: ${backupPath}`);
+            }
+        });
     }
 
     handleConnection(ws, req) {
         const clientIP = req.socket.remoteAddress;
         console.log('Client connected from:', clientIP);
 
-        if (this.checkAccessDenied(clientIP, ws)) {
-            return;
-        }
-
-        ws.binaryType = 'arraybuffer';
         ws.isAlive = true;
+        ws.isAuthenticated = false;
+        ws.sessionToken = null;
+        ws.sharedSecret = null;
 
         this.clients.add(ws);
 
-        ws.on('pong', () => {
-            ws.isAlive = true;
-            console.log('Received pong from client:', clientIP);
-        });
+        // Send server's public key and parameters to the client
+        ws.send(JSON.stringify({
+            type: 'KeyExchange',
+            publicKey: this.keyPair.publicKey,
+            prime: this.keyPair.prime,
+            generator: this.keyPair.generator
+        }));
 
         ws.on('message', async (message) => {
-            if (!this.checkRateLimit(clientIP)) {
-                this.sendError(ws, 'Rate limit exceeded. Please try again later.');
-                return;
-            }
-
-            console.log('Received message from client:', message.toString());
             try {
-                const event = JSON.parse(message.toString());
-                if (!this.validateEvent(event)) {
-                    this.sendError(ws, 'Invalid event format');
+                let event = JSON.parse(message);
+
+                if (event.type === 'KeyExchange') {
+                    // Compute shared secret
+                    const sharedSecret = computeSharedSecret(
+                        this.keyPair.privateKey,
+                        event.publicKey,
+                        this.keyPair.prime,
+                        this.keyPair.generator
+                    );
+                    ws.sharedSecret = sharedSecret;
+                    console.log('Key exchange completed');
                     return;
                 }
-                console.log('Parsed event:', event);
-                await this.handleRequest(event, ws);
+
+                if (ws.isAuthenticated && ws.sharedSecret) {
+                    const decrypted = decrypt(event, ws.sharedSecret);
+                    event = JSON.parse(decrypted);
+                }
+
+                if (event.type === 'Authenticate') {
+                    await handleAuthentication(event.data, ws, this.sessions);
+                } else if (!ws.isAuthenticated) {
+                    this.sendError(ws, 'Not authenticated', event.requestId);
+                } else {
+                    await this.handleRequest(event, ws);
+                }
             } catch (error) {
                 console.error('Error processing message:', error);
                 this.sendError(ws, 'Invalid message format');
@@ -77,100 +160,33 @@ class PyxiCloudServer {
 
         ws.on('close', () => {
             console.log('Client disconnected from:', clientIP);
+            if (ws.sessionToken) {
+                this.sessions.delete(ws.sessionToken);
+            }
             this.clients.delete(ws);
         });
-
-        ws.on('error', (error) => {
-            console.error('WebSocket error:', error);
-            this.clients.delete(ws);
-        });
-    }
-
-    checkAccessDenied(clientIP, ws) {
-        if (config.ipWhitelist && !config.whitelistedIps.includes(clientIP)) {
-            this.sendError(ws, 'Access denied. IP not in whitelist.');
-            ws.close();
-            return true;
-        }
-        if (config.ipBlacklist && config.blacklistedIps.includes(clientIP)) {
-            this.sendError(ws, 'Access denied. IP in blacklist.');
-            ws.close();
-            return true;
-        }
-        return false;
-    }
-
-    checkRateLimit(clientIP) {
-        const now = Date.now();
-        const limit = 100;
-        const interval = 60000;
-
-        if (!this.rateLimiter.has(clientIP)) {
-            this.rateLimiter.set(clientIP, []);
-        }
-
-        const clientRequests = this.rateLimiter.get(clientIP);
-        const recentRequests = clientRequests.filter(time => now - time < interval);
-
-        if (recentRequests.length >= limit) {
-            return false;
-        }
-
-        recentRequests.push(now);
-        this.rateLimiter.set(clientIP, recentRequests);
-        return true;
-    }
-
-    validateEvent(event) {
-        return (
-            event &&
-            typeof event === 'object' &&
-            typeof event.type === 'string' &&
-            typeof event.requestId === 'string' &&
-            event.data !== undefined
-        );
-    }
-
-    startHeartbeat() {
-        setInterval(() => {
-            this.clients.forEach(ws => {
-                if (ws.isAlive === false) {
-                    this.clients.delete(ws);
-                    return ws.terminate();
-                }
-                
-                ws.isAlive = false;
-                ws.ping('', false, (error) => {
-                    if (error) console.error('Ping error:', error);
-                });
-            });
-        }, this.heartbeatInterval);
     }
 
     async handleRequest(event, ws) {
         console.log('Handling request:', event.type);
+        const { type, data, requestId } = event;
+
         try {
-            const { requestId } = event;
-            switch (event.type) {
+            switch (type) {
                 case 'CreateSchema':
-                    console.log('Processing CreateSchema request');
-                    await this.createSchema(event.data, ws, requestId);
+                    await this.createSchema(data, ws, requestId);
                     break;
                 case 'UpdateSchema':
-                    console.log('Processing UpdateSchema request');
-                    await this.updateSchema(event.data, ws, requestId);
+                    await this.updateSchema(data, ws, requestId);
                     break;
                 case 'Query':
-                    console.log('Processing Query request:', event.data.operation);
-                    await this.handleQuery(event.data, ws, requestId);
+                    await this.handleQuery(data, ws, requestId);
                     break;
                 default:
-                    console.log('Unknown event type:', event.type);
-                    this.sendError(ws, 'Unknown event type', requestId);
+                    throw new Error('Unknown event type');
             }
         } catch (error) {
-            console.error('Error handling event:', error);
-            this.sendError(ws, error.message, event.requestId);
+            this.sendError(ws, error.message, requestId);
         }
     }
 
@@ -211,7 +227,7 @@ class PyxiCloudServer {
     validateSchemaData(collectionName, schemaDefinition) {
         return (
             typeof collectionName === 'string' &&
-            collectionName.length > 0  &&
+            collectionName.length > 0 &&
             typeof schemaDefinition === 'object' &&
             Object.keys(schemaDefinition).length > 0
         );
@@ -500,7 +516,11 @@ class PyxiCloudServer {
             data,
             requestId 
         });
-        ws.send(response);
+        if (ws.isAuthenticated && ws.sharedSecret) {
+            ws.send(encrypt(response, ws.sharedSecret));
+        } else {
+            ws.send(response);
+        }
     }
 
     sendError(ws, message, requestId) {
@@ -509,12 +529,15 @@ class PyxiCloudServer {
             message,
             requestId 
         });
-        ws.send(response);
+        if (ws.isAuthenticated && ws.sharedSecret) {
+            ws.send(encrypt(response, ws.sharedSecret));
+        } else {
+            ws.send(response);
+        }
     }
 }
 
 const server = new PyxiCloudServer();
 server.start();
-server.startHeartbeat();
 
 module.exports = PyxiCloudServer;
