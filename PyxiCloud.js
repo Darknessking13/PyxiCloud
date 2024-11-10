@@ -174,27 +174,6 @@ class PyxiCloudServer {
         return false;
     }
 
-    checkRateLimit(clientIP) {
-        const now = Date.now();
-        const limit = 100;
-        const interval = 60000;
-
-        if (!this.rateLimiter.has(clientIP)) {
-            this.rateLimiter.set(clientIP, []);
-        }
-
-        const clientRequests = this.rateLimiter.get(clientIP);
-        const recentRequests = clientRequests.filter(time => now - time < interval);
-
-        if (recentRequests.length >= limit) {
-            return false;
-        }
-
-        recentRequests.push(now);
-        this.rateLimiter.set(clientIP, recentRequests);
-        return true;
-    }
-
     validateEvent(event) {
         return (
             event &&

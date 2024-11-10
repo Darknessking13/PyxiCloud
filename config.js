@@ -7,7 +7,6 @@ module.exports = {
     ipBlacklist: false,
     blacklistedIps: [],
     maxConnections: 100,
-    encryptionKey: 'your-secret-encryption-key',
     credentials: {
         username: 'admin',
         password: 'admin123'
